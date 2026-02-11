@@ -1,0 +1,38 @@
+client_name: "TriArea Community Health"
+
+staff:
+  record_type: person
+  file_type: csv
+  first_name: "First Name"
+  middle_name: "Middle Name"
+  last_name: "Last Name"
+  dob: "DOB"
+  ssn: "Social Security Number"
+  job_title: "Job Title"
+  status: "Employment Status"
+  address: "Address 1"
+  city: "City"
+  state: "State"
+  zip: "Zip"
+
+board:
+  record_type: person
+  file_type: csv
+  skip_rows: 2
+  name_column: "NAME"
+  dob: "DOB"
+  ssn: "SSN"
+  address: "ADDRESS"
+  city: "CITY"
+  state: "STATE"
+  zip: "ZIP"
+
+vendors:
+  record_type: mixed
+  file_type: xlsx
+  entity_name: "NAME"
+  tax_id: "TAX_ID"
+  address: "ADDRESS1"
+  city: "CITY"
+  state: "STATE"
+  zip: "ZIP"
