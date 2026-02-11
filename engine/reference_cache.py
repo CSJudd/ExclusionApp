@@ -131,7 +131,9 @@ def load_oig(cur, oig_path):
 def load_sam(cur, sam_path):
     chunk_size = 50000
 
-    for chunk in pd.read_csv(sam_path, dtype=str, chunksize=chunk_size).fillna(""):
+    for chunk in pd.read_csv(sam_path, dtype=str, chunksize=chunk_size):
+        chunk = chunk.fillna("")
+
         for _, row in chunk.iterrows():
             exclusion_date = row.get("Exclusion Date", "")
 
@@ -144,6 +146,7 @@ def load_sam(cur, sam_path):
                 city = row.get("City", "").upper()
                 state = row.get("State", "").upper()
                 zip_code = normalize_zip(row.get("Zip"))
+
                 cur.execute("""
                     INSERT INTO sam_people VALUES (?, ?, ?, ?, ?, ?)
                 """, (first, last, exclusion_date, city, state, zip_code))
@@ -154,6 +157,7 @@ def load_sam(cur, sam_path):
                 city = row.get("City", "").upper()
                 state = row.get("State", "").upper()
                 zip_code = normalize_zip(row.get("Zip"))
+
                 cur.execute("""
                     INSERT INTO sam_entities VALUES (?, ?, ?, ?, ?)
                 """, (name, exclusion_date, city, state, zip_code))
