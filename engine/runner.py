@@ -93,6 +93,37 @@ def _resolve_column(df: pd.DataFrame, requested: str | None, fallbacks: list[str
     raise ValueError(f"Could not resolve column. Requested={requested!r}. Columns={cols!r}")
 
 
+def _detect_vendor_header_row(vendor_path) -> int | None:
+    """
+    Some client vendor workbooks contain title/date rows above the real header.
+    Detect the first row that appears to be the NAME/CITY/STATE header row.
+    """
+    try:
+        preview = pd.read_excel(vendor_path, dtype=str, header=None, nrows=40).fillna("")
+    except Exception:
+        return None
+
+    def norm(v: str) -> str:
+        return str(v or "").strip().casefold()
+
+    name_tokens = {"name", "vendor", "vendor name", "payee", "entity"}
+    city_tokens = {"city", "town", "municipality"}
+    state_tokens = {"state", "st", "province"}
+
+    for idx, row in preview.iterrows():
+        values = {norm(v) for v in row.tolist() if str(v).strip()}
+        if not values:
+            continue
+
+        has_name = any(v in name_tokens for v in values)
+        has_city = any(v in city_tokens for v in values)
+        has_state = any(v in state_tokens for v in values)
+        if has_name and has_city and has_state:
+            return int(idx)
+
+    return None
+
+
 def run_exclusion_check(
     client_config_path,
     month,
@@ -143,6 +174,24 @@ def run_exclusion_check(
                     "review_id": f"R{review_counter:05d}",
                     "category": "staff",
                     "name": full,
+                    "last_name_display": str(_row_get(row, staff_section["last_name"])).strip(),
+                    "first_name_display": " ".join(
+                        p
+                        for p in [
+                            str(_row_get(row, staff_section["first_name"])).strip(),
+                            str(_row_get(row, staff_section.get("middle_name"))).strip(),
+                        ]
+                        if p
+                    ),
+                    "name_display": " ".join(
+                        p
+                        for p in [
+                            str(_row_get(row, staff_section["first_name"])).strip(),
+                            str(_row_get(row, staff_section.get("middle_name"))).strip(),
+                            str(_row_get(row, staff_section["last_name"])).strip(),
+                        ]
+                        if p
+                    ),
                     "dob": dob_iso,
                     "ssn_last4": ssn_last4,
                     "role": _row_get(row, staff_section.get("job_title")),
@@ -183,6 +232,7 @@ def run_exclusion_check(
                     "review_id": f"R{review_counter:05d}",
                     "category": "board",
                     "name": full,
+                    "name_display": str(full_name).strip(),
                     "dob": dob_iso,
                     "ssn_last4": ssn_last4,
                     "role": "",
@@ -194,10 +244,17 @@ def run_exclusion_check(
 
     # ---------------- VENDORS ----------------
     df_vendor = None
+    vendor_header_row = None
     entity_col = ""
+    city_col = None
+    state_col = None
     if vendor_path:
         vendor_section = config.section("vendors")
-        df_vendor = pd.read_excel(vendor_path, dtype=str).fillna("")
+        vendor_header_row = _detect_vendor_header_row(vendor_path)
+        if vendor_header_row is not None:
+            df_vendor = pd.read_excel(vendor_path, dtype=str, header=vendor_header_row).fillna("")
+        else:
+            df_vendor = pd.read_excel(vendor_path, dtype=str).fillna("")
         df_vendor = _strip_columns(df_vendor)
 
         # Resolve configured columns against real Excel headers (whitespace/case drift safe)
@@ -234,16 +291,23 @@ def run_exclusion_check(
             except Exception:
                 taxid_col = None
 
-        state_col = None
-        if vendor_section.get("state"):
-            try:
-                state_col = _resolve_column(
-                    df_vendor,
-                    vendor_section.get("state"),
-                    fallbacks=["State", "ST", "STATE"],
-                )
-            except Exception:
-                state_col = None
+        try:
+            state_col = _resolve_column(
+                df_vendor,
+                vendor_section.get("state"),
+                fallbacks=["State", "ST", "STATE", "Province"],
+            )
+        except Exception:
+            state_col = None
+
+        try:
+            city_col = _resolve_column(
+                df_vendor,
+                vendor_section.get("city"),
+                fallbacks=["City", "CITY", "Town", "Municipality"],
+            )
+        except Exception:
+            city_col = None
 
         zip_col = None
         if vendor_section.get("zip"):
@@ -259,6 +323,9 @@ def run_exclusion_check(
         for _, row in df_vendor.iterrows():
             name_raw = _row_get(row, entity_col)
             if not str(name_raw).strip():
+                continue
+            name_raw_cf = str(name_raw).strip().casefold()
+            if name_raw_cf in {"name", "vendor", "vendor name", "entity", "payee"}:
                 continue
 
             tax_id = _row_get(row, taxid_col) if taxid_col else ""
@@ -296,10 +363,13 @@ def run_exclusion_check(
                     "review_id": f"R{review_counter:05d}",
                     "category": "vendors",
                     "name": name_raw,
+                    "name_display": str(name_raw).strip(),
                     "dob": "",
                     "ssn_last4": "",
                     "role": "",
                     "status": "",
+                    "city": str(_row_get(row, city_col) if city_col else "").strip(),
+                    "state": state,
                     "classification": classification,
                     **match_result,
                 }
@@ -322,7 +392,10 @@ def run_exclusion_check(
         "board_count": len(results["board"]),
         "vendor_count": len(results["vendors"]),
         "vendor_source_rows": int(len(df_vendor)) if df_vendor is not None else 0,
+        "vendor_header_row": vendor_header_row,
         "vendor_entity_column": entity_col if df_vendor is not None else "",
+        "vendor_city_column": city_col if df_vendor is not None else "",
+        "vendor_state_column": state_col if df_vendor is not None else "",
     }
 
     if oig_path:
@@ -345,7 +418,7 @@ def run_exclusion_check(
 
     # ---------------- COPY TO CLIENT DROPBOX FOLDER ----------------
     # Copy outputs next to the first provided source file (Dropbox folder),
-    # under: ExclusionReports/<month>/
+    # under: ExclusionReports/
     source_file = None
     for p in (staff_path, board_path, vendor_path):
         if p and str(p).strip():
@@ -362,7 +435,7 @@ def run_exclusion_check(
             except Exception:
                 base = base.absolute()
 
-            dropbox_output_dir = base / "ExclusionReports" / month
+            dropbox_output_dir = base / "ExclusionReports"
             dropbox_output_dir.mkdir(parents=True, exist_ok=True)
 
             files_to_copy = [audit_path, staff_pdf, board_pdf, vendor_pdf]
