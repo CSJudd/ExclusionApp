@@ -30,11 +30,13 @@ def cache_exists(month: str):
     return get_cache_path(month).exists()
 
 
-def build_reference_cache(month: str, oig_path: str, sam_path: str):
+def build_reference_cache(month: str, oig_path: str, sam_path: str, force_rebuild: bool = False):
     db_path = get_cache_path(month)
 
     if db_path.exists():
-        raise Exception(f"Cache for {month} already exists.")
+        if not force_rebuild:
+            raise Exception(f"Cache for {month} already exists.")
+        db_path.unlink()
 
     conn = sqlite3.connect(db_path)
     cur = conn.cursor()

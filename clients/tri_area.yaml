@@ -23,16 +23,21 @@ board:
   dob: "DOB"
   ssn: "SSN"
   address: "ADDRESS"
+  city_state_zip: "CITY, STATE, ZIP"
   city: "CITY"
   state: "STATE"
   zip: "ZIP"
 
 vendors:
   record_type: mixed
-  file_type: xlsx
+  file_type: auto
+  header_row: auto
+  true_header_tokens: ["NAME", "CITY", "STATE"]
   entity_name: "NAME"
   tax_id: "TAX_ID"
+  vendor_id: "Vendor ID"
   address: "ADDRESS1"
+  address2: "ADDRESS2"
   city: "CITY"
   state: "STATE"
   zip: "ZIP"

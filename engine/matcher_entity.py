@@ -4,6 +4,17 @@ from rapidfuzz import fuzz
 FUZZ_STRONG = 95
 
 
+def _set_review(result, *, source, candidate_name, exclusion_date, note, needed_data=""):
+    if result.get("review_required"):
+        return
+    result["review_required"] = True
+    result["review_source"] = source
+    result["review_candidate_name"] = candidate_name
+    result["review_candidate_exclusion_date"] = exclusion_date or ""
+    result["review_note"] = note
+    result["review_needed_data"] = needed_data
+
+
 def match_entity(conn, entity_name, city=None, state=None, zip_code=None):
     """
     Returns:
@@ -21,7 +32,13 @@ def match_entity(conn, entity_name, city=None, state=None, zip_code=None):
         "oig_date": "",
         "sam_status": "NOT FOUND",
         "sam_date": "",
-        "reason": ""
+        "reason": "",
+        "review_required": False,
+        "review_source": "",
+        "review_candidate_name": "",
+        "review_candidate_exclusion_date": "",
+        "review_note": "",
+        "review_needed_data": "",
     }
 
     cur = conn.cursor()
@@ -45,9 +62,14 @@ def match_entity(conn, entity_name, city=None, state=None, zip_code=None):
         for db_name, exclusion_date in cur.fetchall():
             score = fuzz.ratio(entity_name, db_name)
             if score >= FUZZ_STRONG:
-                result["oig_status"] = "POSSIBLE"
-                result["oig_date"] = exclusion_date
-                result["reason"] = f"Fuzzy entity match (OIG) score={score}"
+                _set_review(
+                    result,
+                    source="OIG Entities",
+                    candidate_name=db_name,
+                    exclusion_date=exclusion_date,
+                    note=f"High-similarity OIG entity name match (score={score}).",
+                    needed_data="Tax ID / address corroboration",
+                )
                 break
 
     # --- SAM ENTITY MATCH ---
@@ -73,12 +95,24 @@ def match_entity(conn, entity_name, city=None, state=None, zip_code=None):
             if score >= FUZZ_STRONG:
                 # Secondary signal check
                 if state and db_state and state.upper() == db_state:
-                    result["sam_status"] = "POSSIBLE"
-                    result["sam_date"] = exclusion_date
+                    _set_review(
+                        result,
+                        source="SAM Entities",
+                        candidate_name=db_name,
+                        exclusion_date=exclusion_date,
+                        note=f"High-similarity SAM entity match (score={score}) with state corroboration.",
+                        needed_data="Tax ID / exact legal name confirmation",
+                    )
                     break
                 if zip_code and db_zip and zip_code == db_zip:
-                    result["sam_status"] = "POSSIBLE"
-                    result["sam_date"] = exclusion_date
+                    _set_review(
+                        result,
+                        source="SAM Entities",
+                        candidate_name=db_name,
+                        exclusion_date=exclusion_date,
+                        note=f"High-similarity SAM entity match (score={score}) with zip corroboration.",
+                        needed_data="Tax ID / exact legal name confirmation",
+                    )
                     break
 
     return result

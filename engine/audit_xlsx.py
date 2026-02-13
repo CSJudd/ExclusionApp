@@ -22,8 +22,8 @@ def write_audit_workbook(
     create_sheet(wb, "Vendor Results", results.get("vendors", []))
 
     # Consolidated Possible Matches
-    possible_rows = collect_possible(results)
-    create_sheet(wb, "Possible Matches", possible_rows)
+    review_rows = collect_review_required(results)
+    create_sheet(wb, "Review Required", review_rows)
 
     # Metadata sheet
     create_metadata_sheet(wb, metadata)
@@ -49,18 +49,15 @@ def create_sheet(wb, title, rows):
         ws.append([row.get(col, "") for col in headers])
 
 
-def collect_possible(results):
-    possible = []
+def collect_review_required(results):
+    review = []
 
     for category in results.values():
         for row in category:
-            if (
-                row.get("oig_status") == "POSSIBLE"
-                or row.get("sam_status") == "POSSIBLE"
-            ):
-                possible.append(row)
+            if row.get("review_required") or row.get("oig_status") == "POSSIBLE" or row.get("sam_status") == "POSSIBLE":
+                review.append(row)
 
-    return possible
+    return review
 
 
 def create_metadata_sheet(wb, metadata):

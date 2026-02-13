@@ -53,28 +53,42 @@ class ExclusionAppGUI:
         self.month_entry.grid(row=0, column=3, sticky="w", **pad)
         self.month_entry.bind("<KeyRelease>", lambda e: self._update_button_states())
 
-        # Input Files
-        files = ttk.LabelFrame(main, text="Input Files")
+        self.cache_status_var = tk.StringVar(value="Cache status: Unknown")
+        self.cache_status_label = ttk.Label(setup, textvariable=self.cache_status_var)
+        self.cache_status_label.grid(row=1, column=0, columnspan=4, sticky="w", padx=8, pady=(0, 6))
+
+        # Reference Sources (cache build section)
+        refs = ttk.LabelFrame(main, text="Reference Sources (OIG / SAM)")
+        refs.pack(fill="x", **pad)
+        self._file_row(refs, 0, "OIG Source (CSV):", self.oig_path, [("CSV files", "*.csv")])
+        self._file_row(refs, 1, "SAM Source (CSV):", self.sam_path, [("CSV files", "*.csv")])
+
+        ref_actions = ttk.Frame(refs)
+        ref_actions.grid(row=2, column=0, columnspan=3, sticky="w", padx=8, pady=(2, 8))
+        self.btn_build = ttk.Button(ref_actions, text="Build / Regenerate Monthly Cache", command=self.on_build)
+        self.btn_build.pack(side="left")
+
+        # Visual separator between reference and client file sections
+        ttk.Separator(main, orient="horizontal").pack(fill="x", padx=8, pady=6)
+
+        # Client Input Files (run section)
+        files = ttk.LabelFrame(main, text="Client Source Files")
         files.pack(fill="x", **pad)
+        self._file_row(files, 0, "Staff Source (CSV/XLS/XLSX):", self.staff_path, [("Tabular files", "*.csv *.xls *.xlsx *.xlsm")])
+        self._file_row(files, 1, "Board Source (CSV/XLS/XLSX):", self.board_path, [("Tabular files", "*.csv *.xls *.xlsx *.xlsm")])
+        self._file_row(files, 2, "Vendor Source (CSV/XLS/XLSX):", self.vendor_path, [("Tabular files", "*.csv *.xls *.xlsx *.xlsm")])
 
-        self._file_row(files, 0, "OIG CSV:", self.oig_path, [("CSV files", "*.csv")])
-        self._file_row(files, 1, "SAM CSV:", self.sam_path, [("CSV files", "*.csv")])
-        self._file_row(files, 2, "Staff CSV:", self.staff_path, [("CSV files", "*.csv")])
-        self._file_row(files, 3, "Board CSV:", self.board_path, [("CSV files", "*.csv")])
-        self._file_row(files, 4, "Vendors XLSX:", self.vendor_path, [("Excel files", "*.xlsx")])
+        run_actions = ttk.Frame(main)
+        run_actions.pack(fill="x", **pad)
 
-        # Buttons
-        actions = ttk.Frame(main)
-        actions.pack(fill="x", **pad)
-
-        self.btn_build = ttk.Button(actions, text="Build Reference Cache (Monthly)", command=self.on_build)
-        self.btn_build.pack(side="left", padx=10)
-
-        self.btn_run = ttk.Button(actions, text="Run Exclusion Check", command=self.on_run)
+        self.btn_run = ttk.Button(run_actions, text="Run Exclusion Check", command=self.on_run)
         self.btn_run.pack(side="left", padx=10)
 
-        self.btn_open = ttk.Button(actions, text="Open Runs Folder", command=self.open_runs)
+        self.btn_open = ttk.Button(run_actions, text="Open Runs Folder", command=self.open_runs)
         self.btn_open.pack(side="left", padx=10)
+
+        self.btn_quit = ttk.Button(run_actions, text="Quit", command=self.root.destroy)
+        self.btn_quit.pack(side="right", padx=10)
 
         # Log
         log_frame = ttk.LabelFrame(main, text="Status Log")
@@ -116,9 +130,14 @@ class ExclusionAppGUI:
         names = []
 
         for yaml_file in CLIENTS_DIR.glob("*.yaml"):
+            # Keep template scaffolding out of the runnable client list.
+            if yaml_file.name.startswith("client_template"):
+                continue
             try:
                 cfg = ClientConfig(yaml_file)
                 name = cfg.client_name
+                if not name or str(name).strip().casefold() in {"client name here", "template"}:
+                    continue
                 self.client_map[name] = str(yaml_file)
                 names.append(name)
             except Exception:
@@ -150,8 +169,17 @@ class ExclusionAppGUI:
         sam_ok = self._file_exists(self.sam_path.get())
 
         cache_ready = month_ok and cache_exists(self.month_var.get())
+        if month_ok:
+            month = self.month_var.get()
+            if cache_ready:
+                self.cache_status_var.set(f"Cache status ({month}): Ready")
+            else:
+                self.cache_status_var.set(f"Cache status ({month}): Not built")
+        else:
+            self.cache_status_var.set("Cache status: Invalid month format (use YYYY-MM)")
 
-        self.btn_build.config(state="normal" if (client_ok and month_ok and oig_ok and sam_ok and not cache_ready) else "disabled")
+        # Cache build is independent from selected client file set and always allows rebuild.
+        self.btn_build.config(state="normal" if (month_ok and oig_ok and sam_ok) else "disabled")
 
         any_sources = any([
             self._file_exists(self.staff_path.get()),
@@ -165,9 +193,20 @@ class ExclusionAppGUI:
 
     def on_build(self):
         month = self.month_var.get()
-        self._log("Building reference cache...")
-        build_reference_cache(month, self.oig_path.get(), self.sam_path.get())
-        self._log("Reference cache complete.")
+        rebuild = cache_exists(month)
+        if rebuild:
+            confirm = messagebox.askyesno(
+                "Regenerate Cache",
+                f"A reference cache already exists for {month}.\n\n"
+                "Do you want to replace it with the selected OIG/SAM files?"
+            )
+            if not confirm:
+                self._log("Cache regeneration canceled.")
+                return
+
+        self._log("Building reference cache..." if not rebuild else "Regenerating reference cache...")
+        build_reference_cache(month, self.oig_path.get(), self.sam_path.get(), force_rebuild=rebuild)
+        self._log("Reference cache complete." if not rebuild else "Reference cache regenerated.")
         self._update_button_states()
 
     def on_run(self):
@@ -188,6 +227,7 @@ class ExclusionAppGUI:
 
         self._log("Run complete.")
         self._log(f"Outputs saved in: {result['run_directory']}")
+        self._update_button_states()
 
     def open_runs(self):
         runs_dir = Path.home() / "ExclusionAppData" / "runs"

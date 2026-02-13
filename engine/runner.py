@@ -1,5 +1,6 @@
 import sqlite3
 import shutil
+import re
 from pathlib import Path
 from datetime import datetime
 
@@ -93,35 +94,135 @@ def _resolve_column(df: pd.DataFrame, requested: str | None, fallbacks: list[str
     raise ValueError(f"Could not resolve column. Requested={requested!r}. Columns={cols!r}")
 
 
-def _detect_vendor_header_row(vendor_path) -> int | None:
-    """
-    Some client vendor workbooks contain title/date rows above the real header.
-    Detect the first row that appears to be the NAME/CITY/STATE header row.
-    """
+def _resolve_optional_column(df: pd.DataFrame, requested: str | None, fallbacks: list[str]) -> str | None:
     try:
-        preview = pd.read_excel(vendor_path, dtype=str, header=None, nrows=40).fillna("")
+        return _resolve_column(df, requested, fallbacks)
     except Exception:
         return None
 
-    def norm(v: str) -> str:
-        return str(v or "").strip().casefold()
 
-    name_tokens = {"name", "vendor", "vendor name", "payee", "entity"}
-    city_tokens = {"city", "town", "municipality"}
-    state_tokens = {"state", "st", "province"}
+def _infer_file_type(path, configured_file_type: str | None) -> str:
+    cfg = str(configured_file_type or "auto").strip().casefold()
+    if cfg in {"csv", "excel"}:
+        return cfg
+
+    ext = str(Path(path).suffix).strip().casefold()
+    if ext == ".csv":
+        return "csv"
+    if ext in {".xlsx", ".xls", ".xlsm"}:
+        return "excel"
+    raise ValueError(f"Unsupported file extension for {path}: {ext}")
+
+
+def _read_tabular_preview(path, file_type: str, nrows: int, delimiter: str | None):
+    if file_type == "excel":
+        return pd.read_excel(path, dtype=str, header=None, nrows=nrows).fillna("")
+
+    if delimiter and str(delimiter).strip() and str(delimiter).strip().lower() != "auto":
+        return pd.read_csv(path, dtype=str, header=None, nrows=nrows, sep=str(delimiter)).fillna("")
+
+    # Auto delimiter detection for CSV if requested/unspecified.
+    return pd.read_csv(path, dtype=str, header=None, nrows=nrows, sep=None, engine="python").fillna("")
+
+
+def _detect_header_row(path, file_type: str, tokens: list[str], delimiter: str | None = None) -> int | None:
+    """
+    Detect first header row containing all expected tokens.
+    """
+    if not tokens:
+        return None
+    try:
+        preview = _read_tabular_preview(path, file_type, nrows=50, delimiter=delimiter)
+    except Exception:
+        return None
+
+    tokens_cf = [str(t).strip().casefold() for t in tokens if str(t).strip()]
+    if not tokens_cf:
+        return None
 
     for idx, row in preview.iterrows():
-        values = {norm(v) for v in row.tolist() if str(v).strip()}
+        values = [str(v or "").strip().casefold() for v in row.tolist() if str(v).strip()]
         if not values:
             continue
-
-        has_name = any(v in name_tokens for v in values)
-        has_city = any(v in city_tokens for v in values)
-        has_state = any(v in state_tokens for v in values)
-        if has_name and has_city and has_state:
+        if all(any(tok == val or tok in val for val in values) for tok in tokens_cf):
             return int(idx)
-
     return None
+
+
+def _read_table_with_config(path, section: dict, category: str):
+    """
+    Read CSV/Excel based on config + file extension.
+    Supports:
+      - file_type: auto|csv|excel
+      - header_row: auto|int
+      - skip_rows: int
+      - delimiter: ','|...|'auto' (csv only)
+      - true_header_tokens: [..] (optional)
+    """
+    file_type = _infer_file_type(path, section.get("file_type"))
+    delimiter = section.get("delimiter")
+    skip_rows = int(section.get("skip_rows", 0) or 0)
+    header_cfg = section.get("header_row")
+
+    default_tokens = {
+        "staff": ["first", "last", "dob"],
+        "board": ["name", "dob"],
+        "vendors": ["name", "city", "state"],
+    }.get(category, [])
+    cfg_tokens = section.get("true_header_tokens")
+    header_tokens = cfg_tokens if isinstance(cfg_tokens, list) else default_tokens
+
+    detected_header_row = None
+    if isinstance(header_cfg, str) and header_cfg.strip().casefold() == "auto":
+        detected_header_row = _detect_header_row(path, file_type, header_tokens, delimiter=delimiter)
+    elif header_cfg is None and category == "vendors":
+        # Preserve robust vendor behavior even if not explicitly configured.
+        detected_header_row = _detect_header_row(path, file_type, header_tokens, delimiter=delimiter)
+    elif header_cfg not in (None, ""):
+        detected_header_row = int(header_cfg)
+
+    if file_type == "excel":
+        if detected_header_row is not None:
+            df = pd.read_excel(path, dtype=str, header=detected_header_row).fillna("")
+        elif skip_rows:
+            df = pd.read_excel(path, dtype=str, skiprows=skip_rows).fillna("")
+        else:
+            df = pd.read_excel(path, dtype=str).fillna("")
+    else:
+        csv_kwargs = {"dtype": str}
+        if delimiter and str(delimiter).strip():
+            delim = str(delimiter).strip()
+            if delim.lower() == "auto":
+                csv_kwargs.update({"sep": None, "engine": "python"})
+            else:
+                csv_kwargs.update({"sep": delim})
+        if detected_header_row is not None:
+            csv_kwargs["header"] = detected_header_row
+        elif skip_rows:
+            csv_kwargs["skiprows"] = skip_rows
+        df = pd.read_csv(path, **csv_kwargs).fillna("")
+
+    df = _strip_columns(df)
+    return df, file_type, detected_header_row, skip_rows
+
+
+def _parse_city_state_zip(value: str) -> tuple[str, str, str]:
+    text = str(value or "").strip()
+    if not text:
+        return "", "", ""
+
+    # Find the first valid "City, ST ZIP" pattern even if cell repeats it.
+    m = re.search(
+        r"(?P<city>[A-Za-z0-9 .'\-/&]+?),\s*(?P<state>[A-Za-z]{2})\s*(?P<zip>\d{5}(?:-\d{4})?)?",
+        text,
+    )
+    if m:
+        city = (m.group("city") or "").strip()
+        state = (m.group("state") or "").strip().upper()
+        zip_code = (m.group("zip") or "").strip()
+        return city, state, zip_code
+
+    return text, "", ""
 
 
 def run_exclusion_check(
@@ -143,12 +244,22 @@ def run_exclusion_check(
 
     results = {"staff": [], "board": [], "vendors": []}
     review_counter = 1
+    staff_file_type = ""
+    board_file_type = ""
+    vendor_file_type = ""
+    staff_header_row = None
+    board_header_row = None
+    vendor_header_row = None
+    staff_skip_rows = 0
+    board_skip_rows = 0
+    vendor_skip_rows = 0
 
     # ---------------- STAFF ----------------
     if staff_path:
         staff_section = config.section("staff")
-        df_staff = pd.read_csv(staff_path, dtype=str).fillna("")
-        df_staff = _strip_columns(df_staff)
+        df_staff, staff_file_type, staff_header_row, staff_skip_rows = _read_table_with_config(
+            staff_path, staff_section, "staff"
+        )
 
         for _, row in df_staff.iterrows():
             first, last, middle, full = normalize_person_name(
@@ -175,14 +286,8 @@ def run_exclusion_check(
                     "category": "staff",
                     "name": full,
                     "last_name_display": str(_row_get(row, staff_section["last_name"])).strip(),
-                    "first_name_display": " ".join(
-                        p
-                        for p in [
-                            str(_row_get(row, staff_section["first_name"])).strip(),
-                            str(_row_get(row, staff_section.get("middle_name"))).strip(),
-                        ]
-                        if p
-                    ),
+                    "first_name_display": str(_row_get(row, staff_section["first_name"])).strip(),
+                    "middle_name_display": str(_row_get(row, staff_section.get("middle_name"))).strip(),
                     "name_display": " ".join(
                         p
                         for p in [
@@ -196,6 +301,10 @@ def run_exclusion_check(
                     "ssn_last4": ssn_last4,
                     "role": _row_get(row, staff_section.get("job_title")),
                     "status": _row_get(row, staff_section.get("status")),
+                    "address": str(_row_get(row, staff_section.get("address"))).strip(),
+                    "city": str(_row_get(row, staff_section.get("city"))).strip(),
+                    "state": str(_row_get(row, staff_section.get("state"))).strip(),
+                    "zip_display": str(_row_get(row, staff_section.get("zip"))).strip(),
                     **match_result,
                 }
             )
@@ -204,9 +313,50 @@ def run_exclusion_check(
     # ---------------- BOARD ----------------
     if board_path:
         board_section = config.section("board")
-        skip_rows = board_section.get("skip_rows", 0)
-        df_board = pd.read_csv(board_path, dtype=str, skiprows=skip_rows).fillna("")
-        df_board = _strip_columns(df_board)
+        df_board, board_file_type, board_header_row, board_skip_rows = _read_table_with_config(
+            board_path, board_section, "board"
+        )
+
+        board_address_col = _resolve_optional_column(
+            df_board,
+            board_section.get("address"),
+            ["Address", "Address 1", "Address1", "Street Address"],
+        )
+        board_city_col = _resolve_optional_column(
+            df_board,
+            board_section.get("city"),
+            ["City", "Town", "Municipality"],
+        )
+        board_state_col = _resolve_optional_column(
+            df_board,
+            board_section.get("state"),
+            ["State", "ST", "Province"],
+        )
+        board_zip_col = _resolve_optional_column(
+            df_board,
+            board_section.get("zip"),
+            ["Zip", "ZIP", "Zip Code", "Postal Code"],
+        )
+        board_city_state_zip_col = _resolve_optional_column(
+            df_board,
+            board_section.get("city_state_zip"),
+            ["City, State, Zip", "CITY, STATE, ZIP", "City/State/Zip", "Location"],
+        )
+        board_phone_col = _resolve_optional_column(
+            df_board,
+            board_section.get("phone"),
+            ["Phone", "Phone #", "Phone Number", "Telephone", "Cell Phone"],
+        )
+        board_service_year_col = _resolve_optional_column(
+            df_board,
+            board_section.get("service_year"),
+            ["Service Year", "Years of Service", "Term", "Board Service Year", "Effective Date", "Start Date"],
+        )
+        board_email_col = _resolve_optional_column(
+            df_board,
+            board_section.get("email"),
+            ["Email", "Email Address", "E-mail", "E-mail Address"],
+        )
 
         for _, row in df_board.iterrows():
             full_name = _row_get(row, board_section["name_column"])
@@ -219,12 +369,35 @@ def run_exclusion_check(
             zip_code = normalize_zip(_row_get(row, board_section.get("zip")))
             ssn_last4 = extract_ssn_last4(_row_get(row, board_section.get("ssn")))
 
+            city_raw = str(_row_get(row, board_city_col)).strip() if board_city_col else ""
+            state_raw = str(_row_get(row, board_state_col)).strip() if board_state_col else ""
+            zip_raw = str(_row_get(row, board_zip_col)).strip() if board_zip_col else ""
+
+            # If source uses a single "City, State, Zip" column (or duplicate mapping),
+            # parse it into normalized components for matching/reporting.
+            same_location_col = (
+                board_city_col
+                and board_state_col
+                and board_zip_col
+                and len({board_city_col, board_state_col, board_zip_col}) == 1
+            )
+            combo_col = board_city_state_zip_col or (board_city_col if same_location_col else None)
+            if combo_col:
+                if same_location_col:
+                    # Prevent the same raw text from being copied to state/zip on fallback.
+                    state_raw = ""
+                    zip_raw = ""
+                combo_city, combo_state, combo_zip = _parse_city_state_zip(_row_get(row, combo_col))
+                city_raw = combo_city or city_raw
+                state_raw = combo_state or state_raw
+                zip_raw = combo_zip or zip_raw
+
             match_result = match_person(
                 conn,
                 first,
                 last,
                 dob_compact=dob_compact,
-                zip_code=zip_code,
+                zip_code=normalize_zip(zip_raw) or zip_code,
             )
 
             results["board"].append(
@@ -237,6 +410,13 @@ def run_exclusion_check(
                     "ssn_last4": ssn_last4,
                     "role": "",
                     "status": "",
+                    "address": str(_row_get(row, board_address_col)).strip() if board_address_col else "",
+                    "city": city_raw,
+                    "state": state_raw,
+                    "zip_display": zip_raw,
+                    "phone": str(_row_get(row, board_phone_col)).strip() if board_phone_col else "",
+                    "service_year": str(_row_get(row, board_service_year_col)).strip() if board_service_year_col else "",
+                    "email": str(_row_get(row, board_email_col)).strip() if board_email_col else "",
                     **match_result,
                 }
             )
@@ -244,18 +424,18 @@ def run_exclusion_check(
 
     # ---------------- VENDORS ----------------
     df_vendor = None
-    vendor_header_row = None
     entity_col = ""
     city_col = None
     state_col = None
+    taxid_col = None
+    address_col = None
+    address2_col = None
+    vendor_id_col = None
     if vendor_path:
         vendor_section = config.section("vendors")
-        vendor_header_row = _detect_vendor_header_row(vendor_path)
-        if vendor_header_row is not None:
-            df_vendor = pd.read_excel(vendor_path, dtype=str, header=vendor_header_row).fillna("")
-        else:
-            df_vendor = pd.read_excel(vendor_path, dtype=str).fillna("")
-        df_vendor = _strip_columns(df_vendor)
+        df_vendor, vendor_file_type, vendor_header_row, vendor_skip_rows = _read_table_with_config(
+            vendor_path, vendor_section, "vendors"
+        )
 
         # Resolve configured columns against real Excel headers (whitespace/case drift safe)
         try:
@@ -280,7 +460,6 @@ def run_exclusion_check(
         except Exception as e:
             raise Exception(f"Vendor entity_name column mapping failed: {e}")
 
-        taxid_col = None
         if vendor_section.get("tax_id"):
             try:
                 taxid_col = _resolve_column(
@@ -290,6 +469,33 @@ def run_exclusion_check(
                 )
             except Exception:
                 taxid_col = None
+
+        try:
+            address_col = _resolve_column(
+                df_vendor,
+                vendor_section.get("address"),
+                fallbacks=["Address", "ADDRESS", "Address 1", "ADDRESS1", "Street", "Street Address"],
+            )
+        except Exception:
+            address_col = None
+
+        try:
+            address2_col = _resolve_column(
+                df_vendor,
+                vendor_section.get("address2"),
+                fallbacks=["Address 2", "ADDRESS2", "Address2", "Address line 2", "Addr2"],
+            )
+        except Exception:
+            address2_col = None
+
+        try:
+            vendor_id_col = _resolve_column(
+                df_vendor,
+                vendor_section.get("vendor_id"),
+                fallbacks=["Vendor ID", "VendorID", "ID", "Supplier ID", "Payee ID"],
+            )
+        except Exception:
+            vendor_id_col = None
 
         try:
             state_col = _resolve_column(
@@ -370,6 +576,11 @@ def run_exclusion_check(
                     "status": "",
                     "city": str(_row_get(row, city_col) if city_col else "").strip(),
                     "state": state,
+                    "address": str(_row_get(row, address_col) if address_col else "").strip(),
+                    "address2": str(_row_get(row, address2_col) if address2_col else "").strip(),
+                    "zip_display": str(_row_get(row, zip_col) if zip_col else "").strip(),
+                    "vendor_id": str(_row_get(row, vendor_id_col) if vendor_id_col else "").strip(),
+                    "tax_id_display": str(tax_id).strip(),
                     "classification": classification,
                     **match_result,
                 }
@@ -391,11 +602,26 @@ def run_exclusion_check(
         "staff_count": len(results["staff"]),
         "board_count": len(results["board"]),
         "vendor_count": len(results["vendors"]),
+        "staff_file_type": staff_file_type,
+        "board_file_type": board_file_type,
+        "vendor_file_type": vendor_file_type,
+        "staff_header_row": staff_header_row,
+        "board_header_row": board_header_row,
         "vendor_source_rows": int(len(df_vendor)) if df_vendor is not None else 0,
         "vendor_header_row": vendor_header_row,
+        "staff_skip_rows": staff_skip_rows,
+        "board_skip_rows": board_skip_rows,
+        "vendor_skip_rows": vendor_skip_rows,
         "vendor_entity_column": entity_col if df_vendor is not None else "",
         "vendor_city_column": city_col if df_vendor is not None else "",
         "vendor_state_column": state_col if df_vendor is not None else "",
+        "vendor_address_column": address_col if df_vendor is not None else "",
+        "vendor_address2_column": address2_col if df_vendor is not None else "",
+        "vendor_id_column": vendor_id_col if df_vendor is not None else "",
+        "vendor_tax_id_column": taxid_col if df_vendor is not None else "",
+        "staff_review_required": sum(1 for row in results["staff"] if row.get("review_required")),
+        "board_review_required": sum(1 for row in results["board"] if row.get("review_required")),
+        "vendor_review_required": sum(1 for row in results["vendors"] if row.get("review_required")),
     }
 
     if oig_path:
@@ -413,7 +639,7 @@ def run_exclusion_check(
     vendor_pdf = run_dir / "Vendor_Report.pdf"
 
     generate_pdf_report(staff_pdf, config.client_name, month, "Staff Exclusion Report", results["staff"])
-    generate_pdf_report(board_pdf, config.client_name, month, "Board Exclusion Report", results["board"])
+    generate_pdf_report(board_pdf, config.client_name, month, "Board Members Exclusion Report", results["board"])
     generate_pdf_report(vendor_pdf, config.client_name, month, "Vendor Exclusion Report", results["vendors"])
 
     # ---------------- COPY TO CLIENT DROPBOX FOLDER ----------------

@@ -1,0 +1,65 @@
+client_name: "Client Name Here"
+
+staff:
+  record_type: person
+  file_type: auto           # auto | csv | excel
+  # header_row: auto        # optional: auto or 0-based row index
+  # skip_rows: 0            # optional: rows to skip before header (csv/excel)
+  # delimiter: auto         # optional csv only: auto | "," | "|" | "\t"
+  # true_header_tokens: ["First Name", "Last Name", "DOB"]  # optional for header_row: auto
+
+  first_name: "First Name"
+  middle_name: "Middle Name"        # optional
+  last_name: "Last Name"
+  dob: "DOB"
+  ssn: "SSN"                        # optional (last4 masking used in reports)
+  job_title: "Job Title"
+  status: "Employment Status"
+
+  address: "Address 1"              # optional
+  city: "City"                      # optional
+  state: "State"                    # optional
+  zip: "Zip"                        # optional
+
+board:
+  record_type: person
+  file_type: auto
+  # header_row: auto
+  # skip_rows: 0
+  # delimiter: auto
+  # true_header_tokens: ["NAME", "DOB"]
+
+  name_column: "NAME"
+  dob: "DOB"
+  ssn: "SSN"                        # optional
+
+  address: "ADDRESS"                # optional
+  city: "CITY"                      # optional
+  state: "STATE"                    # optional
+  zip: "ZIP"                        # optional
+
+  # Optional combined location column, e.g. "CITY, STATE, ZIP"
+  city_state_zip: "CITY, STATE, ZIP"
+
+  # Optional board-only enrichment columns for PDF layout
+  phone: "PHONE"
+  service_year: "SERVICE YEAR"
+  email: "EMAIL ADDRESS"
+
+vendors:
+  record_type: mixed
+  file_type: auto
+  header_row: auto
+  # skip_rows: 0
+  # delimiter: auto
+  true_header_tokens: ["NAME", "CITY", "STATE"]
+
+  entity_name: "NAME"
+  vendor_id: "Vendor ID"            # optional
+  tax_id: "TAX_ID"                  # optional
+
+  address: "ADDRESS1"               # optional
+  address2: "ADDRESS2"              # optional
+  city: "CITY"                      # optional
+  state: "STATE"                    # optional
+  zip: "ZIP"                        # optional

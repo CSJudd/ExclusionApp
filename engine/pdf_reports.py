@@ -1,8 +1,9 @@
 from datetime import datetime
+import re
 
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER, TA_LEFT
-from reportlab.lib.pagesizes import landscape, letter
+from reportlab.lib.pagesizes import landscape, legal, letter
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import inch
 from reportlab.pdfgen.canvas import Canvas
@@ -45,7 +46,7 @@ def _kind_from_title(title: str) -> str:
 
 
 def _format_exclusion_date(status, date):
-    if status in {"CONFIRMED", "POSSIBLE"} and date:
+    if status == "CONFIRMED" and date:
         return str(date)
     return ""
 
@@ -74,64 +75,172 @@ def _format_display_dob(value):
         return text
 
 
-def _build_table_data(kind: str, rows: list[dict], body_style: ParagraphStyle):
+def _format_city_state_zip(city, state, zip_code):
+    city_t = str(city or "").strip()
+    state_t = str(state or "").strip()
+    zip_t = str(zip_code or "").strip()
+
+    left = ", ".join([p for p in [city_t, state_t] if p])
+    if left and zip_t:
+        return f"{left}, {zip_t}"
+    return left or zip_t
+
+
+def _mask_ssn_last4(last4):
+    digits = str(last4 or "").strip()
+    return f"***-**-{digits}" if digits else ""
+
+
+def _mask_tax_id(value):
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    digits = re.sub(r"\D", "", raw)
+    if len(digits) < 4:
+        return ""
+    last4 = digits[-4:]
+    # Keep a light hint for common tax-id lengths while masking everything else.
+    if len(digits) == 9:
+        return f"**-***{last4}"
+    return f"***{last4}"
+
+
+def _format_service_year(value):
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    for fmt in ("%m/%d/%Y", "%Y-%m-%d", "%m/%d/%y"):
+        try:
+            return str(datetime.strptime(text, fmt).year)
+        except ValueError:
+            continue
+    m = re.search(r"\b(19|20)\d{2}\b", text)
+    return m.group(0) if m else text
+
+
+def _build_table_data(kind: str, rows: list[dict], body_style: ParagraphStyle, header_style: ParagraphStyle):
+    def h(text: str):
+        return Paragraph(text, header_style)
+
+    date_header_sam = "SAM.gov<br/>EXCLUSION DATE"
+    date_header_oig = "HHS/OIG<br/>EXCLUSION DATE"
+
     if kind == "staff":
         headers = [
-            "Last Name",
-            "First Name",
-            "Job Title",
-            "Employment Status",
+            h(date_header_sam),
+            h(date_header_oig),
+            h("Last Name"),
+            h("First Name"),
+            h("Middle Name"),
+            h("DOB"),
+            h("SSN"),
+            h("Job Title"),
+            h("Employment Status"),
+            h("Address 1"),
+            h("City"),
+            h("State"),
+            h("Zip"),
         ]
-        col_widths = [2.0 * inch, 1.9 * inch, 4.9 * inch, 1.7 * inch]
+        col_widths = [1.0 * inch, 1.0 * inch, 1.0 * inch, 1.0 * inch, 0.95 * inch, 0.7 * inch, 0.75 * inch, 1.35 * inch, 1.0 * inch, 1.75 * inch, 0.85 * inch, 0.45 * inch, 0.65 * inch]
         data = [headers]
         for row in rows:
             last_name = str(row.get("last_name_display") or "").strip()
             first_name = str(row.get("first_name_display") or "").strip()
+            middle_name = str(row.get("middle_name_display") or "").strip()
             if not last_name and not first_name:
                 name_text = row.get("name_display") or row.get("name", "")
                 last_name, first_name = _split_name(name_text)
             data.append(
                 [
+                    Paragraph(_format_exclusion_date(row.get("sam_status"), row.get("sam_date")), body_style),
+                    Paragraph(_format_exclusion_date(row.get("oig_status"), row.get("oig_date")), body_style),
                     Paragraph(last_name, body_style),
                     Paragraph(first_name, body_style),
+                    Paragraph(middle_name, body_style),
+                    Paragraph(_format_display_dob(row.get("dob", "")), body_style),
+                    Paragraph(_mask_ssn_last4(row.get("ssn_last4", "")), body_style),
                     Paragraph(str(row.get("role", "")), body_style),
                     Paragraph(str(row.get("status", "")), body_style),
+                    Paragraph(str(row.get("address", "")), body_style),
+                    Paragraph(str(row.get("city", "")), body_style),
+                    Paragraph(str(row.get("state", "")), body_style),
+                    Paragraph(str(row.get("zip_display", "")), body_style),
                 ]
             )
         return data, col_widths
 
     if kind == "board":
-        headers = ["Name", "DOB", "SAM.gov Exclusion Date", "HHS/OIG Exclusion Date"]
-        col_widths = [4.2 * inch, 1.3 * inch, 2.2 * inch, 2.3 * inch]
+        has_phone = any(str(row.get("phone", "")).strip() for row in rows)
+        headers = [
+            h(date_header_sam),
+            h(date_header_oig),
+            h("NAME"),
+            h("ADDRESS"),
+            h("CITY, STATE, ZIP"),
+        ]
+        if has_phone:
+            headers.append(h("PHONE #"))
+        headers.extend([h("SERVICE YEAR"), h("EMAIL ADDRESS"), h("DOB"), h("SSN")])
+
+        if has_phone:
+            col_widths = [1.0 * inch, 1.0 * inch, 1.65 * inch, 2.4 * inch, 1.7 * inch, 1.0 * inch, 0.9 * inch, 1.65 * inch, 0.75 * inch, 0.75 * inch]
+        else:
+            col_widths = [1.0 * inch, 1.0 * inch, 1.85 * inch, 2.5 * inch, 1.9 * inch, 0.9 * inch, 1.95 * inch, 0.8 * inch, 0.8 * inch]
         data = [headers]
         for row in rows:
-            data.append(
+            row_cells = [
+                Paragraph(_format_exclusion_date(row.get("sam_status"), row.get("sam_date")), body_style),
+                Paragraph(_format_exclusion_date(row.get("oig_status"), row.get("oig_date")), body_style),
+                Paragraph(str(row.get("name_display") or row.get("name", "")), body_style),
+                Paragraph(str(row.get("address", "")), body_style),
+                Paragraph(_format_city_state_zip(row.get("city", ""), row.get("state", ""), row.get("zip_display", "")), body_style),
+            ]
+            if has_phone:
+                row_cells.append(Paragraph(str(row.get("phone", "")), body_style))
+            row_cells.extend(
                 [
-                    Paragraph(str(row.get("name_display") or row.get("name", "")), body_style),
+                    Paragraph(_format_service_year(row.get("service_year", "")), body_style),
+                    Paragraph(str(row.get("email", "")), body_style),
                     Paragraph(_format_display_dob(row.get("dob", "")), body_style),
-                    Paragraph(_format_exclusion_date(row.get("sam_status"), row.get("sam_date")), body_style),
-                    Paragraph(_format_exclusion_date(row.get("oig_status"), row.get("oig_date")), body_style),
+                    Paragraph(_mask_ssn_last4(row.get("ssn_last4", "")), body_style),
                 ]
             )
+            data.append(row_cells)
         return data, col_widths
 
     if kind == "vendors":
-        headers = ["Name", "City", "State", "SAM.gov Exclusion Date", "HHS/OIG Exclusion Date"]
-        col_widths = [5.5 * inch, 1.5 * inch, 0.8 * inch, 1.1 * inch, 1.1 * inch]
+        headers = [
+            h(date_header_sam),
+            h(date_header_oig),
+            h("Vendor ID"),
+            h("Vendor"),
+            h("Address line 1"),
+            h("Address line 2"),
+            h("City"),
+            h("State"),
+            h("Zip"),
+            h("Tax ID"),
+        ]
+        col_widths = [1.0 * inch, 1.0 * inch, 0.9 * inch, 2.6 * inch, 2.15 * inch, 1.7 * inch, 1.25 * inch, 0.5 * inch, 0.7 * inch, 0.95 * inch]
         data = [headers]
         for row in rows:
             data.append(
                 [
-                    Paragraph(str(row.get("name_display") or row.get("name", "")), body_style),
-                    Paragraph(str(row.get("city", "")), body_style),
-                    Paragraph(str(row.get("state", "")), body_style),
                     Paragraph(_format_exclusion_date(row.get("sam_status"), row.get("sam_date")), body_style),
                     Paragraph(_format_exclusion_date(row.get("oig_status"), row.get("oig_date")), body_style),
+                    Paragraph(str(row.get("vendor_id", "")), body_style),
+                    Paragraph(str(row.get("name_display") or row.get("name", "")), body_style),
+                    Paragraph(str(row.get("address", "")), body_style),
+                    Paragraph(str(row.get("address2", "")), body_style),
+                    Paragraph(str(row.get("city", "")), body_style),
+                    Paragraph(str(row.get("state", "")), body_style),
+                    Paragraph(str(row.get("zip_display", "")), body_style),
+                    Paragraph(_mask_tax_id(row.get("tax_id_display", "")), body_style),
                 ]
             )
         return data, col_widths
 
-    headers = ["Name", "Role", "SAM Status", "OIG Status"]
+    headers = [h("Name"), h("Role"), h("SAM Status"), h("OIG Status")]
     col_widths = [2.8 * inch, 2.0 * inch, 1.35 * inch, 1.35 * inch]
     data = [headers]
     for row in rows:
@@ -172,9 +281,11 @@ def _intro_text(kind: str) -> tuple[str, str]:
 
 
 def generate_pdf_report(output_path, client_name, month, title, rows):
+    kind = _kind_from_title(title)
+    page_size = landscape(legal) if kind in {"vendors", "board", "staff"} else landscape(letter)
     doc = SimpleDocTemplate(
         str(output_path),
-        pagesize=landscape(letter),
+        pagesize=page_size,
         leftMargin=0.5 * inch,
         rightMargin=0.5 * inch,
         topMargin=0.55 * inch,
@@ -246,6 +357,15 @@ def generate_pdf_report(output_path, client_name, month, title, rows):
         leading=10,
         alignment=TA_LEFT,
     )
+    header_cell_style = ParagraphStyle(
+        "header_cell_style",
+        parent=styles["Normal"],
+        fontName="Helvetica-Bold",
+        fontSize=7,
+        leading=7.5,
+        textColor=colors.white,
+        alignment=TA_LEFT,
+    )
     footer_style = ParagraphStyle(
         "footer_style",
         parent=styles["Normal"],
@@ -256,14 +376,14 @@ def generate_pdf_report(output_path, client_name, month, title, rows):
         alignment=TA_LEFT,
     )
 
-    kind = _kind_from_title(title)
     total = len(rows or [])
     oig_found = sum(1 for row in rows if row.get("oig_status") == "CONFIRMED")
     sam_found = sum(1 for row in rows if row.get("sam_status") == "CONFIRMED")
+    review_required = sum(1 for row in rows if row.get("review_required"))
     total_matches = sum(
         1
         for row in rows
-        if row.get("oig_status") in {"CONFIRMED", "POSSIBLE"} or row.get("sam_status") in {"CONFIRMED", "POSSIBLE"}
+        if row.get("oig_status") == "CONFIRMED" or row.get("sam_status") == "CONFIRMED"
     )
 
     title_display = str(title or "").replace(" Exclusion Report", " Exclusion Screening Report")
@@ -281,6 +401,7 @@ def generate_pdf_report(output_path, client_name, month, title, rows):
     elements.append(Paragraph(f"Total {section_label} Screened: {total}", summary_body))
     elements.append(Paragraph(f"OIG Exclusions Found: {oig_found}", summary_body))
     elements.append(Paragraph(f"SAM Exclusions Found: {sam_found}", summary_body))
+    elements.append(Paragraph(f"Review Required (Potential Matches): {review_required}", summary_body))
     elements.append(Paragraph(f"Total Matches: {total_matches}", summary_body))
     elements.append(Paragraph(f"Report Date: {datetime.now().strftime('%B %d, %Y')}", summary_body))
     elements.append(Spacer(1, 0.1 * inch))
@@ -297,7 +418,11 @@ def generate_pdf_report(output_path, client_name, month, title, rows):
     }.get(kind, "Screened Records")
     elements.append(Paragraph(table_title, summary_heading))
 
-    data, col_widths = _build_table_data(kind, rows or [], body_style)
+    data, col_widths = _build_table_data(kind, rows or [], body_style, header_cell_style)
+    col_count = len(data[0]) if data else 0
+    header_font = 6.5 if col_count >= 10 else (7 if col_count >= 7 else 8)
+    body_font = 6.5 if col_count >= 10 else (7 if col_count >= 7 else 8)
+    pad = 1 if col_count >= 10 else 2
     table = Table(data, colWidths=col_widths, repeatRows=1, hAlign="LEFT")
     table.setStyle(
         TableStyle(
@@ -305,15 +430,15 @@ def generate_pdf_report(output_path, client_name, month, title, rows):
                 ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#224B7A")),
                 ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
                 ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-                ("FONTSIZE", (0, 0), (-1, 0), 8),
-                ("FONTSIZE", (0, 1), (-1, -1), 8),
+                ("FONTSIZE", (0, 0), (-1, 0), header_font),
+                ("FONTSIZE", (0, 1), (-1, -1), body_font),
                 ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#B0BEC5")),
                 ("ALIGN", (0, 0), (-1, -1), "LEFT"),
                 ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                ("LEFTPADDING", (0, 0), (-1, -1), 4),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 4),
-                ("TOPPADDING", (0, 0), (-1, -1), 3),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+                ("LEFTPADDING", (0, 0), (-1, -1), pad),
+                ("RIGHTPADDING", (0, 0), (-1, -1), pad),
+                ("TOPPADDING", (0, 0), (-1, -1), pad),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), pad),
             ]
         )
     )
